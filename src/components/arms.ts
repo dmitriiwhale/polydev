@@ -8,7 +8,7 @@ import {OrderPayload} from '../types'
 dotenv.config()
 
 
-class Arms {
+export class Arms {
     private clobClient: ClobClient | null = null; 
     private signer: Wallet; 
     private walletAddress: string; 
