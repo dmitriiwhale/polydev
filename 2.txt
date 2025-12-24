@@ -1,105 +1,65 @@
-// WRITE методы возвращают Document (то что вернулось из БД)
-async save(order: Order): Promise<Order> {
-  // 1. Проверить наличие в БД по orderId
-  // 2. Если есть → updateOne
-  // 3. Если нет → create
-  // 4. Вернуть результат
+async getWalletReport(): Promise<void> { 
+    try { 
+        const allOrders = await this.getAllOrders();
+        const closedPositions = allOrders.filter(order => 
+            order.status === 'closed' && order.realizedPnl !== null
+        );
+        
+        const totalTrades = closedPositions.length;
+        const winningTrades = closedPositions.filter(p => p.realizedPnl > 0).length;
+        const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
+        
+        const totalPnl = closedPositions.reduce((sum, p) => sum + p.realizedPnl, 0);
+        const avgProfitPerWin = winningTrades > 0 
+            ? closedPositions.filter(p => p.realizedPnl > 0)
+                .reduce((sum, p) => sum + p.realizedPnl, 0) / winningTrades
+            : 0;
+        
+        const tradingProfile = this.analyzeTradingBehavior(closedPositions);
+        
+        const report = {
+            wallet: this.walletAddress,
+            period: 'all-time',
+            metrics: {
+                totalTrades,
+                winningTrades,
+                winRate: parseFloat(winRate.toFixed(2)),
+                totalPnl: parseFloat(totalPnl.toFixed(4)),
+                avgProfitPerWin: parseFloat(avgProfitPerWin.toFixed(4)),
+                bestTrade: Math.max(...closedPositions.map(p => p.realizedPnl)),
+                worstTrade: Math.min(...closedPositions.map(p => p.realizedPnl)),
+                sharpeRatio: this.calculateSharpeRatio(closedPositions),
+                maxDrawdown: this.calculateMaxDrawdown(closedPositions),
+                volatility: this.calculateVolatility(closedPositions)
+            },
+            behavior: tradingProfile,
+            generatedAt: new Date().toISOString(),
+            chain: 'polygon',
+            protocol: 'polymarket'
+        };
+        
+        await this.persistReport(report);
+        this.emit('wallet-report:generated', report);
+        
+        console.log(`✅ Wallet Report Generated: ${this.walletAddress}`);
+        console.log(`   📈 ${report.metrics.winRate}% Win Rate | ${report.metrics.totalTrades} trades`);
+        console.log(`   💰 P&L: $${report.metrics.totalPnl} | Sharpe: ${report.metrics.sharpeRatio}`);
+        console.log(`   🎯 Profile: ${report.behavior.profileType}`);
+        
+        return;
+        
+    } catch (error) { 
+        const errorContext = {
+            method: 'getWalletReport',
+            wallet: this.walletAddress,
+            timestamp: new Date().toISOString(),
+            error: error.message,
+            stackTrace: error.stack
+        };
+        
+        console.error('❌ Wallet Report Generation Failed:', errorContext);
+        await this.sendErrorNotification(errorContext);
+        
+        throw new Error(`Wallet report generation failed: ${error.message}`);
+    }
 }
-
-async update(orderId: string, updates: Partial<Order>): Promise<Order> {
-  // 1. Найти ордер
-  // 2. Если не найден → выбросить ошибку
-  // 3. Обновить поля
-  // 4. Вернуть обновленный ордер
-}
-
-// READ методы возвращают найденные документы
-async findById(orderId: string): Promise<Order> {
-  // 1. Найти по orderId
-  // 2. Если не найден → выбросить ошибку
-  // 3. Вернуть ордер
-}
-
-async findAll(): Promise<Order[]> {
-  // 1. Получить все ордера
-  // 2. Вернуть массив
-}
-
-async findByStatus(status: OrderStatus): Promise<Order[]> {
-  // 1. Найти все ордера с таким статусом
-  // 2. Вернуть массив
-}
-
-// COUNT методы возвращают числа или объекты со статистикой
-async countByStatus(): Promise<{ [key in OrderStatus]: number }> {
-  // 1. Агрегация по status
-  // 2. Вернуть { FILLED: 10, PENDING: 2, ... }
-}
-POLYMARKET_MAIN_CONTRACT   = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045'
-CTF_EXCHANGE_CONTRACT      = '0xC5d563A36AE78145C45a50134d48A1215220f80a'
-UMA_ADAPTER_CONTRACT       = '0x65070BE91477460D8A7AeEb94ef92fe056C2f2A7'
-
-
-# ==========================================
-# The Graph API Configuration
-# ==========================================
-# Получить API ключ: https://thegraph.com/studio/apikeys
-THE_GRAPH_API_KEY=your_the_graph_api_key_here
-
-# Polymarket Subgraph URL (не менять без причины)
-POLYMARKET_SUBGRAPH_URL=https://gateway.thegraph.com/api/{api-key}/subgraphs/id/Bx1W4S7kDVxs9gC3s2G6DS8kdNBJNVhMviCtin2DiBp
-
-# ==========================================
-# Polygon Mainnet RPC
-# ==========================================
-# Варианты:
-# - https://polygon-rpc.com (публичный)
-# - https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY (Alchemy)
-# - https://polygon-mainnet.infura.io/v3/YOUR_KEY (Infura)
-POLYGON_RPC_URL=https://polygon-rpc.com
-
-# ==========================================
-# Polymarket Contract Addresses (Polygon Mainnet)
-# ==========================================
-# НЕ МЕНЯТЬ эти адреса! Это официальные контракты Polymarket
-POLYMARKET_MAIN_CONTRACT=0x4d97dcd97ec945f40cf65f87097ace5ea0476045
-CTF_EXCHANGE_CONTRACT=0xC5d563A36AE78145C45a50134d48A1215220f80a
-UMA_ADAPTER_CONTRACT=0x65070BE91477460D8A7AeEb94ef92fe056C2f2A7
-
-# ==========================================
-# Logging Configuration
-# ==========================================
-# Уровни: debug, info, warn, error
-LOG_LEVEL=info
-
-# ==========================================
-# Caching Configuration
-# ==========================================
-CACHE_ENABLED=true
-CACHE_DIR=./cache
-
-# ==========================================
-# Optional: Database (для future features)
-# ==========================================
-DATABASE_URL=sqlite:./data/polymarket.db
-
-
-
-# Polymarket Subgraph API
-THE_GRAPH_API_KEY=YOUR_THE_GRAPH_API_KEY
-POLYMARKET_SUBGRAPH_URL=https://gateway.thegraph.com/api/{api-key}/subgraphs/id/Bx1W4S7kDVxs9gC3s2G6DS8kdNBJNVhMviCtin2DiBp
-
-# Polygon RPC
-POLYGON_RPC_URL=https://polygon-rpc.com
-# или Alchemy: https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY
-# или Infura: https://polygon-mainnet.infura.io/v3/YOUR_KEY
-
-# Polymarket контракты (Polygon Mainnet)
-POLYMARKET_MAIN_CONTRACT=0x4d97dcd97ec945f40cf65f87097ace5ea0476045
-CTF_EXCHANGE_CONTRACT=0xC5d563A36AE78145C45a50134d48A1215220f80a
-UMA_ADAPTER_CONTRACT=0x65070BE91477460D8A7AeEb94ef92fe056C2f2A7
-
-# Logging
-LOG_LEVEL=info
-CACHE_ENABLED=true
-CACHE_DIR=./cache
