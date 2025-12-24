@@ -12,9 +12,11 @@ export enum OrderStatus {
 export interface Order { 
     orderId: string; 
     market: string; 
-
+    side: OrderSide
     price: number
     size: number 
+
+    status: OrderStatus;
 
     openedAt: Date;
     closedAt?: Date; 
@@ -67,7 +69,7 @@ export interface Position {
     lossCount: number;
     breakEvenCount: number;
     winRate: number;
-    winLossRatio: number;
+    winLossRatio: number | null;
   
     // === PNL ПО ВРЕМЕННЫМ ПРОМЕЖУТКАМ ===
     pnlAllTime: number;
@@ -95,4 +97,10 @@ export interface Position {
     FILLED: number; 
     CANCELLED: number;
     FAILED: number;
+  }
+
+  export interface OrderOptions { 
+    tickSize?: string; 
+    negRisk?: boolean;
+    orderType?: 'GTC' | 'FOK' | 'GTD'; 
   }

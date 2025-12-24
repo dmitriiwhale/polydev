@@ -5,7 +5,7 @@ import {OrderModel} from '../../db/schemas'
 import {Order, OrderStatus,StatusCount} from '../../types/index'
 
 
-export class orderRepository {
+export class OrderRepository {
 
     constructor(private orderModel: typeof OrderModel) { 
 
@@ -74,9 +74,6 @@ export class orderRepository {
             const orderByMarket = await this.orderModel.find({
                 market
             })
-            if(!orderByMarket) { 
-                throw new Error('По данному маркету отсутсвуют ордера')
-            }
             return orderByMarket
         }catch(error) { 
             console.log('Произошла ошибка')
@@ -123,7 +120,7 @@ export class orderRepository {
         }
     }
 
-    async update(updates: Partial<Order>, orderId: string): Promise<Order> { 
+    async update(orderId: string, updates: Partial<Order>): Promise<Order> { 
         try{
             const order = await this.orderModel.findOne({
                 orderId: orderId

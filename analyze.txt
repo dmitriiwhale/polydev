@@ -1,0 +1,435 @@
+#!/usr/bin/env node
+
+/**
+ * Polymarket Win Rate Analyzer (ALL-TIME VERSION)
+ * Финальная версия, которая загружает ВСЕ закрытые позиции со всей истории трейдера
+ * 
+ * Ключевое отличие: используется пагинация для получения всех сделок, а не только первых 50
+ */
+
+import axios from 'axios';
+
+// ═══════════════════════════════════════════════════════════════
+// КОНФИГУРАЦИЯ
+// ═══════════════════════════════════════════════════════════════
+
+const CONFIG = {
+  // Официальный Polymarket Data API
+  POLYMARKET_API_BASE: 'https://data-api.polymarket.com',
+  
+  // Таймауты
+  TIMEOUT: 30000,
+  
+  // Лимиты запросов
+  LIMIT_PER_REQUEST: 50,  // API позволяет максимум 50 за запрос
+  MAX_OFFSET: 100000,     // Максимальное значение offset в API
+};
+
+// ═══════════════════════════════════════════════════════════════
+// ТИПЫ ДАННЫХ ДЛЯ POLYMARKET DATA API
+// ═══════════════════════════════════════════════════════════════
+
+interface ClosedPosition {
+  user: string;
+  conditionId: string;
+  tokenId: string;
+  outcomeIndex: number;
+  positionId: string;
+  realizedPnl: string | null;  // Строка с десятичным числом (например, "-0.15")
+  percentRealizedPnl: string | null;
+  totalCost: string | null;
+  balance: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ActivityItem {
+  id: string;
+  user: string;
+  timestamp: string;
+  type: 'trade' | 'split' | 'merge' | 'redeem' | 'reward' | 'conversion';
+  conditionId?: string;
+  cashAmount?: string;  // Сумма в USDC (1e6 = $1)
+  tokenAmount?: string; // Количество токенов (1e18 = 1 токен)
+  side?: 'buy' | 'sell';
+  txHash?: string;
+}
+
+interface PositionResult {
+  positionId: string;
+  invested: number;     // в USD ($)
+  payout: number;       // в USD ($)
+  profitLoss: number;   // в USD ($)
+  roi: number;          // ROI в процентах
+  realizedPnl: number;  // Реализованная P&L в USD ($)
+  outcome: 'WIN' | 'LOSS' | 'PENDING';
+  status: 'closed';
+}
+
+interface WinRateMetrics {
+  totalClosedPositions: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  totalInvested: number;
+  totalProfit: number;
+  totalLoss: number;
+  netPnl: number;
+  averageWinSize: number;
+  averageLossSize: number;
+  largestWin: number;
+  largestLoss: number;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ЛОГИРОВАНИЕ
+// ═══════════════════════════════════════════════════════════════
+
+class Logger {
+  info(msg: string) { console.log(`ℹ️  ${msg}`); }
+  success(msg: string) { console.log(`✅ ${msg}`); }
+  error(msg: string) { console.error(`❌ ${msg}`); }
+  warn(msg: string) { console.warn(`⚠️  ${msg}`); }
+}
+
+const log = new Logger();
+
+// ═══════════════════════════════════════════════════════════════
+// POLYMARKET DATA API СЕРВИС
+// ═══════════════════════════════════════════════════════════════
+
+async function fetchFromDataAPI(endpoint: string, params: any): Promise<any[]> {
+  try {
+    const url = `${CONFIG.POLYMARKET_API_BASE}${endpoint}`;
+    
+    const response = await axios.get(url, {
+      params,
+      timeout: CONFIG.TIMEOUT,
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Polymarket-Analyzer/2.0'
+      }
+    });
+
+    if (!response.data || !Array.isArray(response.data)) {
+      log.warn(`API вернул неожиданный формат данных: ${endpoint}`);
+      return [];
+    }
+
+    return response.data;
+  } catch (error: any) {
+    if (error.response?.status === 404) {
+      log.warn(`Эндпоинт ${endpoint} не найден (404).`);
+    } else {
+      log.error(`API Error: ${endpoint} - ${error.message}`);
+    }
+    return [];
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ПОЛУЧЕНИЕ ВСЕХ ЗАКРЫТЫХ ПОЗИЦИЙ С ПАГИНАЦИЕЙ
+// ═══════════════════════════════════════════════════════════════
+
+async function getAllClosedPositions(walletAddress: string): Promise<ClosedPosition[]> {
+  log.info(`📊 Загружаю ВСЕ закрытые позиции для кошелька: ${walletAddress}`);
+  log.info(`   Используется пагинация для получения полной истории...`);
+  
+  const allPositions: ClosedPosition[] = [];
+  let offset = 0;
+  let batchNumber = 1;
+  let hasMoreData = true;
+
+  try {
+    while (hasMoreData && offset <= CONFIG.MAX_OFFSET) {
+      log.info(`   📄 Загружаю батч ${batchNumber} (offset: ${offset})...`);
+      
+      const positions = await fetchFromDataAPI('/closed-positions', {
+        user: walletAddress.toLowerCase(),
+        limit: CONFIG.LIMIT_PER_REQUEST,
+        offset: offset
+      });
+
+      if (positions.length === 0) {
+        // Если ничего не вернулось, значит достигли конца
+        hasMoreData = false;
+        log.info(`   ✓ Конец данных достигнут.`);
+      } else {
+        allPositions.push(...positions);
+        log.success(`   ✓ Батч ${batchNumber}: загружено ${positions.length} позиций (всего: ${allPositions.length})`);
+        
+        // Если батч меньше чем лимит, это последний батч
+        if (positions.length < CONFIG.LIMIT_PER_REQUEST) {
+          hasMoreData = false;
+          log.info(`   ✓ Это был последний батч (меньше ${CONFIG.LIMIT_PER_REQUEST} позиций).`);
+        }
+        
+        offset += CONFIG.LIMIT_PER_REQUEST;
+        batchNumber++;
+        
+        // Небольшая задержка, чтобы не перегружать API
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+
+    log.success(`\n✅ Успешно загружено ВСЕГО закрытых позиций: ${allPositions.length}\n`);
+    return allPositions;
+    
+  } catch (error) {
+    log.error(`Ошибка при загрузке закрытых позиций: ${error}`);
+    log.warn(`Загружено позиций до ошибки: ${allPositions.length}`);
+    return allPositions;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// АНАЛИЗ ДАННЫХ
+// ═══════════════════════════════════════════════════════════════
+
+function analyzeClosedPosition(position: ClosedPosition): PositionResult {
+  // Парсим финансовые значения
+  const realizedPnl = position.realizedPnl ? parseFloat(position.realizedPnl) : 0;
+  const totalCost = position.totalCost ? parseFloat(position.totalCost) : 0;
+  
+  // Вычисляем инвестиции и выплату
+  const invested = Math.max(totalCost, 0);
+  const payout = invested + realizedPnl;
+  
+  // Вычисляем ROI
+  const roi = invested > 0 ? (realizedPnl / invested) * 100 : 0;
+  
+  // Определяем исход
+  let outcome: 'WIN' | 'LOSS' | 'PENDING' = 'PENDING';
+  
+  if (realizedPnl > 0.001) { // Учитываем небольшую погрешность
+    outcome = 'WIN';
+  } else if (realizedPnl < -0.001) {
+    outcome = 'LOSS';
+  } else {
+    outcome = 'PENDING'; // Безубыточная позиция
+  }
+
+  return {
+    positionId: position.positionId,
+    invested,
+    payout,
+    profitLoss: realizedPnl,
+    roi,
+    realizedPnl,
+    outcome,
+    status: 'closed',
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// РАСЧЕТ МЕТРИК
+// ═══════════════════════════════════════════════════════════════
+
+function calculateMetrics(positions: PositionResult[]): WinRateMetrics {
+  if (positions.length === 0) {
+    return {
+      totalClosedPositions: 0,
+      wins: 0,
+      losses: 0,
+      winRate: 0,
+      totalInvested: 0,
+      totalProfit: 0,
+      totalLoss: 0,
+      netPnl: 0,
+      averageWinSize: 0,
+      averageLossSize: 0,
+      largestWin: 0,
+      largestLoss: 0,
+    };
+  }
+
+  const wins = positions.filter(p => p.outcome === 'WIN');
+  const losses = positions.filter(p => p.outcome === 'LOSS');
+  
+  const winCount = wins.length;
+  const lossCount = losses.length;
+  const totalClosedPositions = positions.length;
+  
+  // Финансовые расчеты
+  const totalInvested = positions.reduce((sum, p) => sum + p.invested, 0);
+  const totalProfit = wins.reduce((sum, w) => sum + w.profitLoss, 0);
+  const totalLoss = losses.reduce((sum, l) => sum + l.profitLoss, 0); // отрицательное значение
+  const netPnl = totalProfit + totalLoss;
+  
+  // Win Rate
+  const winRate = totalClosedPositions > 0 ? (winCount / totalClosedPositions) * 100 : 0;
+  
+  // Средние значения
+  const averageWinSize = winCount > 0 ? totalProfit / winCount : 0;
+  const averageLossSize = lossCount > 0 ? totalLoss / lossCount : 0;
+  
+  // Наибольшие выигрыши/проигрыши
+  const largestWin = wins.length > 0 ? Math.max(...wins.map(w => w.profitLoss)) : 0;
+  const largestLoss = losses.length > 0 ? Math.min(...losses.map(l => l.profitLoss)) : 0;
+
+  return {
+    totalClosedPositions,
+    wins: winCount,
+    losses: lossCount,
+    winRate,
+    totalInvested,
+    totalProfit,
+    totalLoss,
+    netPnl,
+    averageWinSize,
+    averageLossSize,
+    largestWin,
+    largestLoss,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ВЫВОД РЕЗУЛЬТАТОВ
+// ═══════════════════════════════════════════════════════════════
+
+function printResults(metrics: WinRateMetrics, positions: PositionResult[]): void {
+  console.log('\n════════════════════════════════════════════════════════════════════');
+  console.log('               📊 POLYMARKET АНАЛИЗ РЕЗУЛЬТАТОВ (ВСЕ ВРЕМЯ)');
+  console.log('════════════════════════════════════════════════════════════════════\n');
+
+  console.log('🎯 ОБЩАЯ СТАТИСТИКА');
+  console.log(`  Всего закрытых позиций: ${metrics.totalClosedPositions}`);
+  console.log(`  Выигрыши:               ${metrics.wins}`);
+  console.log(`  Проигрыши:              ${metrics.losses}`);
+  console.log(`  Win Rate:               ${metrics.winRate.toFixed(2)}%`);
+  console.log('');
+
+  console.log('💰 ФИНАНСОВЫЕ ПОКАЗАТЕЛИ');
+  console.log(`  Общие инвестиции:       $${metrics.totalInvested.toFixed(2)}`);
+  console.log(`  Общая прибыль:          $${metrics.totalProfit.toFixed(2)}`);
+  console.log(`  Общий убыток:           $${Math.abs(metrics.totalLoss).toFixed(2)}`);
+  console.log(`  Чистая P&L:             $${metrics.netPnl.toFixed(2)}`);
+  
+  // Вычисляем ROI по всему портфелю
+  const portfolioROI = metrics.totalInvested > 0 
+    ? (metrics.netPnl / metrics.totalInvested) * 100 
+    : 0;
+  console.log(`  Portfolio ROI:          ${portfolioROI.toFixed(2)}%`);
+  console.log('');
+
+  console.log('📊 СРЕДНИЕ ПОКАЗАТЕЛИ');
+  console.log(`  Средний выигрыш:        $${metrics.averageWinSize.toFixed(2)}`);
+  console.log(`  Средний проигрыш:       $${Math.abs(metrics.averageLossSize).toFixed(2)}`);
+  console.log(`  Крупнейший выигрыш:     $${metrics.largestWin.toFixed(2)}`);
+  console.log(`  Крупнейший проигрыш:    $${Math.abs(metrics.largestLoss).toFixed(2)}`);
+  console.log('');
+
+  // Показываем первые 10 позиций (самые новые)
+  if (positions.length > 0) {
+    console.log('📋 ПОСЛЕДНИЕ 10 СДЕЛОК');
+    const recentPositions = positions.slice(0, Math.min(10, positions.length));
+    
+    recentPositions.forEach((position, index) => {
+      const symbol = position.outcome === 'WIN' ? '🟢' : 
+                     position.outcome === 'LOSS' ? '🔴' : '⚪';
+      
+      console.log(`  ${symbol} Позиция ${position.positionId.substring(0, 16)}... | ${position.outcome} | P&L: $${position.profitLoss.toFixed(2)} | ROI: ${position.roi.toFixed(1)}%`);
+    });
+  }
+
+  console.log('\n════════════════════════════════════════════════════════════════════');
+  log.success('Анализ успешно завершен!');
+  console.log('════════════════════════════════════════════════════════════════════\n');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ГЛАВНАЯ ФУНКЦИЯ
+// ═══════════════════════════════════════════════════════════════
+
+async function analyzeWallet(walletAddress: string): Promise<void> {
+  try {
+    console.log('\n════════════════════════════════════════════════════════════════════');
+    console.log('     📊 POLYMARKET WIN RATE ANALYZER (Версия "ВСЕ ВРЕМЯ")');
+    console.log('      Использует Polymarket Data API с полной пагинацией');
+    console.log('════════════════════════════════════════════════════════════════════\n');
+    
+    log.info(`Анализирую кошелек: ${walletAddress}`);
+    log.info(`Начало анализа: ${new Date().toLocaleString()}\n`);
+
+    // Шаг 1: Получить ВСЕ закрытые позиции (со всей пагинацией)
+    const closedPositions = await getAllClosedPositions(walletAddress);
+
+    if (closedPositions.length === 0) {
+      log.warn('Закрытые позиции не найдены для этого кошелька');
+      log.warn('Возможные причины:');
+      log.warn('  1. Кошелек не совершал сделок на Polymarket');
+      log.warn('  2. Все позиции еще открыты');
+      log.warn('  3. Кошелек не существует');
+      return;
+    }
+
+    // Шаг 2: Проанализировать позиции
+    log.info('🔄 Анализирую позиции...');
+    const analyzedPositions = closedPositions.map(analyzeClosedPosition);
+
+    // Шаг 3: Рассчитать метрики
+    const metrics = calculateMetrics(analyzedPositions);
+
+    // Шаг 4: Вывести результаты
+    printResults(metrics, analyzedPositions);
+    
+  } catch (error: any) {
+    log.error(`Критическая ошибка: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ТОЧКА ВХОДА
+// ═══════════════════════════════════════════════════════════════
+
+const walletAddress = process.argv[2];
+
+if (!walletAddress || walletAddress === '--help' || walletAddress === '-h') {
+  console.log(`
+🚀 POLYMARKET WIN RATE ANALYZER (Версия "ВСЕ ВРЕМЯ")
+
+Использование:
+  npx ts-node analyzer_final_all_time.ts <WALLET_ADDRESS>
+  
+Пример:
+  npx ts-node analyzer_final_all_time.ts 0xDf8C0017dbb54A5A2b2670334088C8fdEd6ccb40
+
+Описание:
+  Этот инструмент анализирует ВСЕ исторические (закрытые) позиции кошелька 
+  со всей истории торговли на Polymarket, используя официальный Polymarket Data API.
+
+Ключевое отличие от других версий:
+  ✓ Загружает ВСЕ закрытые позиции, а не только первые 50
+  ✓ Использует механизм пагинации для получения полной истории
+  ✓ Показывает win rate за ВСЕ время трейдера
+  ✓ Рассчитывает итоговый ROI по всему портфелю
+
+Особенности:
+  • Использует рабочий эндпоинт: ${CONFIG.POLYMARKET_API_BASE}
+  • Анализирует только закрытые позиции (где известен realizedPnl)
+  • Показывает финансовые результаты в USD
+  • Включает подробную статистику по wins/losses
+
+Технические детали:
+  • Эндпоинт: /closed-positions (с пагинацией limit + offset)
+  • Не требует API ключей
+  • Работает с реальными данными Polymarket
+  • Максимальный offset: ${CONFIG.MAX_OFFSET}
+  `);
+  process.exit(0);
+}
+
+// Валидация адреса кошелька
+const ethAddressRegex = /^0x[a-fA-F0-9]{40}$/;
+if (!ethAddressRegex.test(walletAddress)) {
+  log.error(`Неверный формат адреса кошелька: ${walletAddress}`);
+  log.error('Адрес должен быть в формате 0x... (40 hex символов)');
+  process.exit(1);
+}
+
+// Запуск анализа
+analyzeWallet(walletAddress).catch((error) => {
+  log.error(`Неожиданная ошибка: ${error}`);
+  process.exit(1);
+});
