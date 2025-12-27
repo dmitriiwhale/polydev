@@ -24,5 +24,3 @@ export async function startCLI(): Promise<void> {
   
   if (action === 'Trader Lookup') await traderLookup();
 }
-
-startCLI();
